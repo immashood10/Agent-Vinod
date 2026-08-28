@@ -27,6 +27,7 @@ export function ChatPanel({
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -36,14 +37,34 @@ export function ChatPanel({
     scrollToBottom();
   }, [messages]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const sendCurrentInput = async () => {
     if (!input.trim() || isLoading) return;
 
     const message = input;
     setInput("");
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "auto";
+    }
 
     await onSendMessage(message);
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    void sendCurrentInput();
+  };
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value);
+    e.target.style.height = "auto";
+    e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void sendCurrentInput();
+    }
   };
 
   return (
@@ -150,14 +171,16 @@ export function ChatPanel({
 
       {/* Input Area */}
       <div className="border-t border-gray-700 p-4 bg-gray-800">
-        <form onSubmit={handleSubmit} className="flex gap-2">
-          <input
-            type="text"
+        <form onSubmit={handleSubmit} className="flex gap-2 items-end">
+          <textarea
+            ref={textareaRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={handleInputChange}
+            onKeyDown={handleKeyDown}
             placeholder="Describe your website..."
             disabled={isLoading}
-            className="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-400 focus:outline-none focus:border-blue-500 disabled:opacity-50"
+            rows={1}
+            className="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-400 focus:outline-none focus:border-blue-500 disabled:opacity-50 resize-none overflow-y-auto leading-relaxed max-h-[200px]"
           />
           <button
             type="submit"
