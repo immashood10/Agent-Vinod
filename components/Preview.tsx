@@ -7,14 +7,14 @@ interface PreviewProps {
   isLoading?: boolean;
   buildStatus?: "idle" | "building" | "success" | "error";
   buildError?: string;
-  previewUrl?: string;
+  srcDoc?: string;
 }
 
 export function Preview({
   isLoading = false,
   buildStatus = "idle",
   buildError,
-  previewUrl = "",
+  srcDoc = "",
 }: PreviewProps) {
   const [showPreview, setShowPreview] = useState(false);
   const [iframeKey, setIframeKey] = useState(0);
@@ -78,10 +78,10 @@ export function Preview({
           </div>
         )}
 
-        {buildStatus === "success" && previewUrl && (
+        {buildStatus === "success" && srcDoc && (
           <iframe
             key={iframeKey}
-            src={previewUrl}
+            srcDoc={srcDoc}
             title="Generated Website Preview"
             className="w-full h-full border-none"
             sandbox="allow-scripts allow-popups allow-forms"

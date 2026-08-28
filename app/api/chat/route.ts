@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callGemini, GeminiMessage } from "@/lib/gemini";
 import { AGENT_SYSTEM_PROMPT } from "@/lib/agent/planner";
-import * as vfs from "@/lib/virtual-fs";
-import { recordTurn, RecordedChange } from "@/lib/history-store";
+import { FileChange } from "@/types/agent";
 
 interface IncomingMessage {
   role: "user" | "assistant" | "model";
@@ -16,52 +15,100 @@ function toGeminiMessages(raw: IncomingMessage[]): GeminiMessage[] {
   }));
 }
 
+function normalizePath(rawPath: string): string {
+  const cleaned = rawPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  const segments = cleaned.split("/").filter((s) => s && s !== ".");
+  const resolved: string[] = [];
+
+  for (const segment of segments) {
+    if (segment === "..") {
+      resolved.pop();
+    } else {
+      resolved.push(segment);
+    }
+  }
+
+  return resolved.join("/");
+}
+
+// Operates on a plain in-request object, not any persisted store - the
+// current file set comes in with the request and the updated set goes
+// back out in the response. This keeps the route fully stateless, which
+// is required for serverless platforms like Vercel (no shared memory or
+// writable disk between invocations).
 function executeTool(
   toolName: string,
   toolInput: Record<string, unknown>,
-  changes: RecordedChange[]
+  files: Record<string, string>,
+  changes: FileChange[]
 ): string {
   try {
     switch (toolName) {
-      case "read_file":
-        return vfs.readFile(toolInput.path as string);
+      case "read_file": {
+        const p = normalizePath(toolInput.path as string);
+        if (!(p in files)) {
+          throw new Error(`File not found: ${toolInput.path}`);
+        }
+        return files[p];
+      }
 
       case "write_file": {
-        const filePath = toolInput.path as string;
-        const before = vfs.fileExists(filePath) ? vfs.readFile(filePath) : null;
-        vfs.writeFile(filePath, toolInput.content as string);
+        const p = normalizePath(toolInput.path as string);
+        const before = p in files ? files[p] : null;
+        const content = toolInput.content as string;
+        files[p] = content;
         changes.push({
-          path: filePath,
+          path: p,
           action: before === null ? "created" : "updated",
           before,
-          after: toolInput.content as string,
+          after: content,
         });
-        return `File created: ${filePath}`;
+        return `File created: ${p}`;
       }
 
       case "update_file": {
-        const filePath = toolInput.path as string;
-        const before = vfs.readFile(filePath);
-        vfs.updateFile(
-          filePath,
-          toolInput.oldString as string,
-          toolInput.newString as string
-        );
-        const after = vfs.readFile(filePath);
-        changes.push({ path: filePath, action: "updated", before, after });
-        return `File updated: ${filePath}`;
+        const p = normalizePath(toolInput.path as string);
+        if (!(p in files)) {
+          throw new Error(`File not found: ${toolInput.path}`);
+        }
+        const before = files[p];
+        const oldString = toolInput.oldString as string;
+        if (!before.includes(oldString)) {
+          throw new Error("Old string not found in file");
+        }
+        const after = before.replace(oldString, toolInput.newString as string);
+        files[p] = after;
+        changes.push({ path: p, action: "updated", before, after });
+        return `File updated: ${p}`;
       }
 
       case "delete_file": {
-        const filePath = toolInput.path as string;
-        const before = vfs.fileExists(filePath) ? vfs.readFile(filePath) : null;
-        vfs.deleteFile(filePath);
-        changes.push({ path: filePath, action: "deleted", before, after: null });
-        return `File deleted: ${filePath}`;
+        const p = normalizePath(toolInput.path as string);
+        const before = p in files ? files[p] : null;
+        delete files[p];
+        changes.push({ path: p, action: "deleted", before, after: null });
+        return `File deleted: ${p}`;
       }
 
-      case "list_files":
-        return JSON.stringify(vfs.listFiles(toolInput.path as string));
+      case "list_files": {
+        const dir = normalizePath((toolInput.path as string) || "");
+        const seen = new Set<string>();
+        const entries: Array<{ name: string; type: "file" | "directory" }> = [];
+
+        for (const key of Object.keys(files)) {
+          if (dir && !key.startsWith(`${dir}/`)) continue;
+          const rest = dir ? key.slice(dir.length + 1) : key;
+          const [first, ...remainder] = rest.split("/");
+          if (!first || seen.has(first)) continue;
+          seen.add(first);
+          entries.push({
+            name: first,
+            type: remainder.length > 0 ? "directory" : "file",
+          });
+        }
+
+        return JSON.stringify(entries);
+      }
 
       default:
         return `Unknown tool: ${toolName}`;
@@ -74,9 +121,14 @@ function executeTool(
 
 export async function POST(req: NextRequest) {
   try {
-    const { messages, userPrompt } = await req.json();
+    const {
+      messages,
+      userPrompt,
+      files: incomingFiles,
+    } = await req.json();
 
-    // Initialize conversation if starting fresh
+    const files: Record<string, string> = { ...(incomingFiles || {}) };
+
     const conversationMessages: GeminiMessage[] = toGeminiMessages(
       messages || []
     );
@@ -88,25 +140,22 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Call Gemini with tools
     let { response, toolUses, modelContent } = await callGemini(
       conversationMessages,
       AGENT_SYSTEM_PROMPT
     );
 
-    // Execute tools in a loop until no more tool calls
     let iterations = 0;
     const maxIterations = 10;
-    const changes: RecordedChange[] = [];
+    const changes: FileChange[] = [];
 
     while (toolUses.length > 0 && iterations < maxIterations) {
       iterations++;
 
-      // Execute all tools and collect results
       const functionResponseParts = [];
 
       for (const toolUse of toolUses) {
-        const result = executeTool(toolUse.name, toolUse.input, changes);
+        const result = executeTool(toolUse.name, toolUse.input, files, changes);
         functionResponseParts.push({
           functionResponse: {
             id: toolUse.id,
@@ -116,40 +165,25 @@ export async function POST(req: NextRequest) {
         });
       }
 
-      // Add the model's turn (including its function calls) back to the conversation
       if (modelContent) {
         conversationMessages.push(modelContent);
       }
 
-      // Add tool results to conversation
       conversationMessages.push({
         role: "user",
         parts: functionResponseParts,
       });
 
-      // Call Gemini again with tool results
       const result = await callGemini(conversationMessages, AGENT_SYSTEM_PROMPT);
       response = result.response;
       toolUses = result.toolUses;
       modelContent = result.modelContent;
     }
 
-    // Final response
-    conversationMessages.push({
-      role: "model",
-      parts: [{ text: response }],
-    });
-
-    const { userMessage, assistantMessage } = recordTurn(
-      userPrompt || "",
-      response,
-      changes
-    );
-
     return NextResponse.json({
       response,
-      userMessage,
-      assistantMessage,
+      files,
+      changes,
       success: true,
     });
   } catch (error) {

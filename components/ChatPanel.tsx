@@ -6,8 +6,8 @@ import type { Message } from "@/types/agent";
 
 interface ChatPanelProps {
   onSendMessage: (message: string) => Promise<void>;
-  onRevertTurn?: (turnId: string) => Promise<void>;
-  onNewChat?: () => Promise<void>;
+  onRevertTurn?: (message: Message) => void;
+  onNewChat?: () => void;
   isLoading: boolean;
   messages: Message[];
 }
@@ -26,8 +26,6 @@ export function ChatPanel({
   messages,
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
-  const [revertingId, setRevertingId] = useState<string | null>(null);
-  const [isClearing, setIsClearing] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -48,39 +46,19 @@ export function ChatPanel({
     await onSendMessage(message);
   };
 
-  const handleRevert = async (turnId: string) => {
-    if (!onRevertTurn || revertingId) return;
-    setRevertingId(turnId);
-    try {
-      await onRevertTurn(turnId);
-    } finally {
-      setRevertingId(null);
-    }
-  };
-
-  const handleNewChat = async () => {
-    if (!onNewChat || isClearing || isLoading) return;
-    setIsClearing(true);
-    try {
-      await onNewChat();
-    } finally {
-      setIsClearing(false);
-    }
-  };
-
   return (
     <div className="flex flex-col h-full bg-gradient-to-b from-gray-900 to-gray-800 border-l border-gray-700">
       {/* Header */}
       {onNewChat && (
         <div className="border-b border-gray-700 p-2">
           <button
-            onClick={handleNewChat}
-            disabled={isClearing || isLoading}
+            onClick={onNewChat}
+            disabled={isLoading}
             title="Clear the current website and start a new chat"
             className="w-full flex items-center justify-center gap-2 text-sm text-gray-300 hover:text-white hover:bg-gray-700 rounded-lg px-3 py-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <SquarePen className={`w-4 h-4 ${isClearing ? "animate-pulse" : ""}`} />
-            {isClearing ? "Clearing..." : "New Chat"}
+            <SquarePen className="w-4 h-4" />
+            New Chat
           </button>
         </div>
       )}
@@ -126,17 +104,15 @@ export function ChatPanel({
                     <span className="text-xs text-gray-400">
                       {msg.changes.length} file{msg.changes.length > 1 ? "s" : ""} changed
                     </span>
-                    {msg.turnId && onRevertTurn && (
+                    {onRevertTurn && (
                       <button
-                        onClick={() => handleRevert(msg.turnId!)}
-                        disabled={isLoading || revertingId !== null}
+                        onClick={() => onRevertTurn(msg)}
+                        disabled={isLoading}
                         title="Revert this change"
                         className="text-xs text-blue-300 hover:text-blue-200 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <RotateCcw
-                          className={`w-3 h-3 ${revertingId === msg.turnId ? "animate-spin" : ""}`}
-                        />
-                        {revertingId === msg.turnId ? "Reverting..." : "Revert"}
+                        <RotateCcw className="w-3 h-3" />
+                        Revert
                       </button>
                     )}
                   </div>

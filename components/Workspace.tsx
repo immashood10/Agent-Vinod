@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { ChatPanel } from "@/components/ChatPanel";
 import { FileExplorer } from "@/components/FileExplorer";
 import { CodeEditor } from "@/components/CodeEditor";
@@ -14,89 +14,120 @@ interface FileItem {
   children?: FileItem[];
 }
 
+const CHAT_STORAGE_KEY = "agent-vinod-chat-history";
+
+function buildFileTree(files: Record<string, string>): FileItem[] {
+  function listDir(prefix: string): FileItem[] {
+    const seen = new Set<string>();
+    const items: FileItem[] = [];
+
+    for (const key of Object.keys(files)) {
+      if (prefix && !key.startsWith(`${prefix}/`)) continue;
+      const rest = prefix ? key.slice(prefix.length + 1) : key;
+      const [first, ...remainder] = rest.split("/");
+      if (!first || seen.has(first)) continue;
+      seen.add(first);
+
+      const entryPath = prefix ? `${prefix}/${first}` : first;
+      if (remainder.length > 0) {
+        items.push({
+          name: first,
+          path: entryPath,
+          type: "directory",
+          children: listDir(entryPath),
+        });
+      } else {
+        items.push({ name: first, path: entryPath, type: "file" });
+      }
+    }
+
+    return items;
+  }
+
+  return listDir("");
+}
+
+// Inlines local <link rel="stylesheet"> / <script src="..."> references so
+// the whole site can be rendered via a single iframe srcDoc with no server
+// round-trip. External URLs (CDNs like Bootstrap) are left untouched.
+function buildPreviewDoc(files: Record<string, string>): string {
+  const index = files["index.html"];
+  if (index === undefined) return "";
+
+  const isExternal = (url: string) => /^([a-z]+:)?\/\//i.test(url);
+  const resolveLocal = (href: string) => {
+    const key = href.replace(/^\.?\//, "");
+    return files[key] !== undefined ? key : null;
+  };
+
+  let html = index.replace(/<link\b[^>]*>/gi, (tag) => {
+    const relMatch = /rel=["']([^"']+)["']/i.exec(tag);
+    const hrefMatch = /href=["']([^"']+)["']/i.exec(tag);
+    if (!relMatch || !hrefMatch) return tag;
+    if (relMatch[1].toLowerCase() !== "stylesheet") return tag;
+    if (isExternal(hrefMatch[1])) return tag;
+    const key = resolveLocal(hrefMatch[1]);
+    return key ? `<style>\n${files[key]}\n</style>` : tag;
+  });
+
+  html = html.replace(
+    /<script\b([^>]*)\bsrc=["']([^"']+)["']([^>]*)>\s*<\/script>/gi,
+    (full, before, src, after) => {
+      if (isExternal(src)) return full;
+      const key = resolveLocal(src);
+      return key ? `<script${before}${after}>\n${files[key]}\n</script>` : full;
+    }
+  );
+
+  return html;
+}
+
 export function Workspace() {
   const [messages, setMessages] = useState<Message[]>([]);
+  const [files, setFiles] = useState<Record<string, string>>({});
   const [selectedFile, setSelectedFile] = useState<string>("");
-  const [fileContent, setFileContent] = useState<string>("");
-  const [files, setFiles] = useState<FileItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState<string>("");
-  const [buildStatus, setBuildStatus] = useState<
-    "idle" | "building" | "success" | "error"
-  >("idle");
   const [buildError, setBuildError] = useState<string>("");
 
-  const refreshFiles = useCallback(async (): Promise<FileItem[]> => {
-    try {
-      const response = await fetch("/api/files");
-      const data = await response.json();
-      if (data.success) {
-        setFiles(data.files);
-        return data.files;
-      }
-    } catch {
-      // File explorer just won't update; not fatal to the chat workflow.
-    }
-    return [];
-  }, []);
-
-  const loadHistory = useCallback(async () => {
-    try {
-      const response = await fetch("/api/history");
-      const data = await response.json();
-      if (data.success) {
-        setMessages(data.messages);
-      }
-    } catch {
-      // No saved history yet, or it failed to load - start with an empty chat.
-    }
-  }, []);
-
-  // The generated site is in-memory only (never written to disk), so the
-  // "preview" is just: does index.html currently exist for this session?
-  const updatePreview = useCallback((currentFiles: FileItem[]) => {
-    const hasIndex = currentFiles.some(
-      (f) => f.type === "file" && f.name === "index.html"
-    );
-    if (hasIndex) {
-      setPreviewUrl(`/api/preview-serve/index.html?v=${Date.now()}`);
-      setBuildStatus("success");
-      setBuildError("");
-    } else {
-      setPreviewUrl("");
-      setBuildStatus("idle");
-      setBuildError("");
-    }
-  }, []);
-
-  const refreshWorkspace = useCallback(async () => {
-    const fetchedFiles = await refreshFiles();
-    updatePreview(fetchedFiles);
-  }, [refreshFiles, updatePreview]);
-
-  const handleFileSelect = useCallback(async (filePath: string) => {
-    setSelectedFile(filePath);
-    try {
-      const response = await fetch(
-        `/api/files/content?path=${encodeURIComponent(filePath)}`
-      );
-      const data = await response.json();
-      setFileContent(data.success ? data.content : `// ${data.error}`);
-    } catch (error) {
-      setFileContent(`// Error loading file: ${(error as Error).message}`);
-    }
-  }, []);
-
+  // Chat history is the only thing that survives a refresh - it's kept in
+  // localStorage (client-owned), never sent anywhere for server storage.
+  // The generated site itself lives only in React state, so it is cleared
+  // automatically on every page load.
   useEffect(() => {
-    void (async () => {
-      // Generated site code is ephemeral by design: every fresh page load
-      // clears whatever was in memory before, so a refresh always starts
-      // from a clean workspace. Chat history is unaffected by this.
-      await fetch("/api/workspace/reset", { method: "POST" }).catch(() => {});
-      await loadHistory();
-      await refreshWorkspace();
+    (() => {
+      try {
+        const raw = window.localStorage.getItem(CHAT_STORAGE_KEY);
+        if (raw) setMessages(JSON.parse(raw));
+      } catch {
+        // Corrupt or inaccessible storage - just start with an empty chat.
+      }
     })();
-  }, [loadHistory, refreshWorkspace]);
+  }, []);
+
+  const persistMessages = useCallback((next: Message[]) => {
+    setMessages(next);
+    try {
+      window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // Storage full/unavailable (e.g. private browsing) - chat still
+      // works for this session, it just won't survive a refresh.
+    }
+  }, []);
+
+  const fileTree = useMemo(() => buildFileTree(files), [files]);
+  const previewDoc = useMemo(() => buildPreviewDoc(files), [files]);
+
+  const buildStatus: "idle" | "building" | "success" | "error" = isLoading
+    ? "building"
+    : buildError
+      ? "error"
+      : previewDoc
+        ? "success"
+        : "idle";
+
+  const handleFileSelect = useCallback((filePath: string) => {
+    setSelectedFile(filePath);
+  }, []);
 
   const handleSendMessage = useCallback(async (userPrompt: string) => {
     const pendingUserMessage: Message = {
@@ -106,7 +137,8 @@ export function Workspace() {
       timestamp: new Date().toISOString(),
     };
 
-    setMessages((prev) => [...prev, pendingUserMessage]);
+    const historyBeforeSend = messages;
+    persistMessages([...historyBeforeSend, pendingUserMessage]);
     setIsLoading(true);
     setBuildError("");
 
@@ -118,28 +150,38 @@ export function Workspace() {
         },
         body: JSON.stringify({
           userPrompt,
-          messages: messages.map((msg) => ({
+          messages: historyBeforeSend.map((msg) => ({
             role: msg.role,
             content: msg.content,
           })),
+          files,
         }),
       });
 
       const data = await response.json();
 
       if (data.success) {
-        setMessages((prev) => [
-          ...prev.filter((m) => m.id !== pendingUserMessage.id),
-          data.userMessage,
-          data.assistantMessage,
-        ]);
-        await refreshWorkspace();
+        setFiles(data.files);
+
+        const userMessage: Message = {
+          ...pendingUserMessage,
+          id: `user-${Date.now()}`,
+        };
+        const assistantMessage: Message = {
+          id: `assistant-${Date.now()}`,
+          role: "assistant",
+          content: data.response,
+          timestamp: new Date().toISOString(),
+          changes: data.changes && data.changes.length > 0 ? data.changes : undefined,
+        };
+
+        persistMessages([...historyBeforeSend, userMessage, assistantMessage]);
       } else {
         setBuildError(data.error || "Failed to process request");
-        setBuildStatus("error");
 
-        setMessages((prev) => [
-          ...prev,
+        persistMessages([
+          ...historyBeforeSend,
+          pendingUserMessage,
           {
             id: `error-${Date.now()}`,
             role: "assistant",
@@ -152,10 +194,10 @@ export function Workspace() {
       const err = error as Error;
       const errorMsg = `Connection error: ${err.message}`;
       setBuildError(errorMsg);
-      setBuildStatus("error");
 
-      setMessages((prev) => [
-        ...prev,
+      persistMessages([
+        ...historyBeforeSend,
+        pendingUserMessage,
         {
           id: `error-${Date.now()}`,
           role: "assistant",
@@ -166,41 +208,29 @@ export function Workspace() {
     } finally {
       setIsLoading(false);
     }
-  }, [messages, refreshWorkspace]);
+  }, [messages, files, persistMessages]);
 
-  const handleNewChat = useCallback(async () => {
-    try {
-      await Promise.all([
-        fetch("/api/workspace/reset", { method: "POST" }),
-        fetch("/api/history/clear", { method: "POST" }),
-      ]);
-    } finally {
-      setMessages([]);
-      setSelectedFile("");
-      setFileContent("");
-      await refreshWorkspace();
-    }
-  }, [refreshWorkspace]);
-
-  const handleRevertTurn = useCallback(async (turnId: string) => {
-    try {
-      const response = await fetch("/api/history/rollback", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ turnId }),
-      });
-      const data = await response.json();
-      if (data.success) {
-        await refreshWorkspace();
-      } else {
-        setBuildError(data.error || "Revert failed");
-        setBuildStatus("error");
+  const handleRevertTurn = useCallback((message: Message) => {
+    if (!message.changes) return;
+    setFiles((prev) => {
+      const next = { ...prev };
+      for (const change of message.changes!) {
+        if (change.before === null) {
+          delete next[change.path];
+        } else {
+          next[change.path] = change.before;
+        }
       }
-    } catch (error) {
-      setBuildError((error as Error).message);
-      setBuildStatus("error");
-    }
-  }, [refreshWorkspace]);
+      return next;
+    });
+  }, []);
+
+  const handleNewChat = useCallback(() => {
+    setFiles({});
+    setSelectedFile("");
+    setBuildError("");
+    persistMessages([]);
+  }, [persistMessages]);
 
   return (
     <div className="h-screen flex flex-col bg-gray-900">
@@ -222,7 +252,7 @@ export function Workspace() {
         {/* Left: File Explorer */}
         <div className="w-64 flex flex-col border-r border-gray-700 bg-gray-900">
           <FileExplorer
-            files={files}
+            files={fileTree}
             onFileSelect={handleFileSelect}
             isLoading={false}
           />
@@ -233,11 +263,8 @@ export function Workspace() {
           <div className="flex-1 flex flex-col min-w-0 border-r border-gray-700">
             <CodeEditor
               fileName={selectedFile}
-              content={fileContent}
-              onClose={() => {
-                setSelectedFile("");
-                setFileContent("");
-              }}
+              content={files[selectedFile] ?? ""}
+              onClose={() => setSelectedFile("")}
             />
           </div>
         )}
@@ -248,7 +275,7 @@ export function Workspace() {
             isLoading={isLoading}
             buildStatus={buildStatus}
             buildError={buildError}
-            previewUrl={previewUrl}
+            srcDoc={previewDoc}
           />
         </div>
 

@@ -3,13 +3,14 @@ export interface Message {
   role: 'user' | 'assistant';
   content: string;
   timestamp: string;
-  turnId?: string;
   changes?: FileChange[];
 }
 
 export interface FileChange {
   path: string;
   action: 'created' | 'updated' | 'deleted';
+  before: string | null;
+  after: string | null;
 }
 
 export interface WorkspaceFile {

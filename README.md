@@ -32,28 +32,27 @@ An autonomous AI-powered frontend development agent that transforms natural-lang
 - Update styling and layout
 - Preserve existing functionality
 
-📦 **Ephemeral by Design**
-- Generated site code lives only in server memory for the current session - it is never written to disk
-- A page refresh clears the generated site and starts a clean workspace (chat history is unaffected)
+📦 **Ephemeral by Design, Stateless Backend**
+- Generated site code lives only in the browser tab's memory for the current session - it is never written to disk or stored server-side
+- A page refresh clears the generated site and starts a clean workspace
+- Chat history survives a refresh via the browser's `localStorage` - not a server database
+- The `/api/chat` route is fully stateless (no in-memory or on-disk server state), so it deploys cleanly to serverless platforms like Vercel
 
 ## Architecture
 
-### Backend Components
+### Backend
 
-- **Chat API Route** (`/app/api/chat/route.ts`): Gemini integration with tool execution
+- **Chat API Route** (`/app/api/chat/route.ts`): the only backend route. Stateless - it receives the current site's files and chat context in the request, runs the Gemini tool-calling loop against an in-request file map, and returns the updated files plus a change summary. Nothing is read from or written to disk/memory between requests.
 - **Gemini Integration** (`/lib/gemini.ts`): Tool-calling via the official `@google/genai` SDK
-- **Virtual File System** (`/lib/virtual-fs.ts`): In-memory (not disk) file store the agent's tools operate on
-- **History Store** (`/lib/history-store.ts`): Persists chat messages and per-turn file-change snapshots (for revert) to a local JSON file
-- **Preview Serving** (`/app/api/preview-serve/[...path]/route.ts`): Serves in-memory files with correct MIME types so the Preview iframe can load `index.html` plus its relative `css`/`js`/asset links
 - **Agent Planner** (`/lib/agent/planner.ts`): System prompt and planning
 
-### Frontend Components
+### Frontend (owns all state)
 
-- **Workspace** (`/components/Workspace.tsx`): Main layout orchestrator
-- **Chat Panel** (`/components/ChatPanel.tsx`): User input, message display, per-turn change summary + revert
-- **File Explorer** (`/components/FileExplorer.tsx`): In-memory file tree navigation
+- **Workspace** (`/components/Workspace.tsx`): Main layout orchestrator. Holds the generated site's files (`Record<path, content>`) in React state, and chat messages in React state + `localStorage`. Builds the file tree and an inlined preview document (CSS/JS inlined into `index.html`) purely client-side.
+- **Chat Panel** (`/components/ChatPanel.tsx`): User input, message display, per-turn change summary + revert (revert is a pure client-side state update - no network call)
+- **File Explorer** (`/components/FileExplorer.tsx`): File tree navigation over the in-memory file map
 - **Code Editor** (`/components/CodeEditor.tsx`): File content display
-- **Preview** (`/components/Preview.tsx`): Live website preview with build status
+- **Preview** (`/components/Preview.tsx`): Live website preview via a sandboxed iframe `srcDoc`, build status
 
 ## Setup
 
@@ -120,19 +119,18 @@ Every assistant message that changed files shows a "N files changed" summary wit
 ## Security Considerations
 
 ✅ **Implemented**
-- API key stored server-side only
-- Generated code never touches disk - no path-traversal surface for the generated site
+- API key stored server-side only, never sent to the client
+- Generated code never touches disk on the server - no path-traversal surface
 - Preview iframe is sandboxed (`allow-scripts allow-popups allow-forms`, no `allow-same-origin`) so generated code can't reach the parent app's cookies/storage/DOM
-- Local chat/change history file is git-ignored
 
 ## Agent Tools
 
-The Gemini agent has access to (all operate on the in-memory workspace only):
+The Gemini agent has access to (all operate on the in-request file map only):
 - `read_file` - Read file contents
 - `write_file` - Create new files
 - `update_file` - Modify existing files
 - `delete_file` - Remove files
-- `list_files` - Browse the current in-memory structure
+- `list_files` - Browse the current file structure
 
 ## Technology Stack
 
@@ -147,32 +145,38 @@ The Gemini agent has access to (all operate on the in-memory workspace only):
 agent-app/
 ├── app/
 │   ├── api/
-│   │   ├── chat/route.ts                  # Gemini API endpoint
-│   │   ├── files/route.ts                 # In-memory file tree
-│   │   ├── files/content/route.ts         # In-memory file content
-│   │   ├── history/route.ts               # Chat/change history
-│   │   ├── history/rollback/route.ts      # Revert a turn's changes
-│   │   ├── preview-serve/[...path]/route.ts  # Serves the in-memory site for the Preview iframe
-│   │   └── workspace/reset/route.ts       # Clears the in-memory site (called on page load)
+│   │   └── chat/route.ts         # The only backend route - stateless Gemini endpoint
 │   ├── page.tsx                  # Main page
 │   └── layout.tsx                # Root layout
 ├── components/
 │   ├── ChatPanel.tsx             # Chat interface + change history/revert
 │   ├── CodeEditor.tsx            # Code display
 │   ├── FileExplorer.tsx          # File tree
-│   ├── Preview.tsx               # Website preview
-│   └── Workspace.tsx             # Main layout
+│   ├── Preview.tsx               # Website preview (iframe srcDoc)
+│   └── Workspace.tsx             # Main layout + all client-side state
 ├── lib/
 │   ├── gemini.ts                 # Gemini integration
-│   ├── virtual-fs.ts             # In-memory file store
-│   ├── history-store.ts          # Chat + change history persistence
 │   └── agent/
 │       └── planner.ts            # Agent planning / system prompt
 ├── types/
 │   └── agent.ts                  # Type definitions
-├── .agent-history/                # Local chat/change history (git-ignored)
 ├── .env.local                    # Environment config
 └── package.json
+```
+
+## Deployment (Vercel)
+
+The app is fully stateless server-side, so it deploys to Vercel with no extra configuration:
+
+```bash
+vercel login
+vercel --prod
+```
+
+Then set the environment variables in the Vercel project settings (Settings → Environment Variables):
+```
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-3.5-flash-lite
 ```
 
 ## Development Commands
@@ -196,7 +200,8 @@ npm run lint
 - Requires a valid Gemini API key
 - Default stack has no server-side/build tooling - it's best suited for static, client-side sites
 - A different stack (React/Next.js/etc.) only happens on explicit request, and isn't compiled/served the same way (no build pipeline exists for it yet)
-- Generated site code is intentionally not persisted - refreshing the page clears it
+- Generated site code is intentionally not persisted anywhere - refreshing the page clears it, and it isn't shared across browser tabs/devices
+- Very large generated sites could approach `localStorage`'s ~5-10MB per-origin limit for chat history (unlikely in normal use)
 
 ## Support
 
