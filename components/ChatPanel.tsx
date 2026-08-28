@@ -91,8 +91,9 @@ export function ChatPanel({
           <div className="h-full flex items-center justify-center text-center">
             <div>
               <h2 className="text-xl font-semibold text-gray-300 mb-2">
-                AI Frontend Agent
+                Agent Vinod
               </h2>
+              <p className="text-xs text-gray-500 mb-2">(AI Frontend Agent)</p>
               <p className="text-sm text-gray-400">
                 Describe your website idea in any language
               </p>

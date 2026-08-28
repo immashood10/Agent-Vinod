@@ -208,13 +208,10 @@ export function Workspace() {
       <div className="bg-gradient-to-r from-blue-900 to-purple-900 border-b border-gray-700 px-6 py-3 shadow-lg">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-white">AI Frontend Agent</h1>
-            <p className="text-sm text-blue-200">
-              Build websites with natural language
-            </p>
+            <h1 className="text-2xl font-bold text-white">Agent Vinod</h1>
+            <p className="text-sm text-blue-200">(AI Frontend Agent)</p>
           </div>
           <div className="text-right text-xs text-blue-200">
-            <p>Gemini API Powered</p>
             <p>HTML • CSS • Bootstrap • JS</p>
           </div>
         </div>

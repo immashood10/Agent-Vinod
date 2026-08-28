@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI Frontend Agent",
+  title: "Agent Vinod (AI Frontend Agent)",
   description: "Build websites with natural language using Gemini AI",
 };
 
