@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { callGemini, GeminiMessage } from "@/lib/gemini";
 import { AGENT_SYSTEM_PROMPT } from "@/lib/agent/planner";
-import { FileChange } from "@/types/agent";
+import { FileChange, ImageAttachment } from "@/types/agent";
 
 interface IncomingMessage {
   role: "user" | "assistant" | "model";
@@ -13,6 +13,27 @@ function toGeminiMessages(raw: IncomingMessage[]): GeminiMessage[] {
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }],
   }));
+}
+
+function sanitizeFileName(name: string): string {
+  const cleaned = name.replace(/[^a-zA-Z0-9._-]/g, "_");
+  return cleaned || "image";
+}
+
+function uniquePath(basePath: string, files: Record<string, string>): string {
+  if (!(basePath in files)) return basePath;
+
+  const dot = basePath.lastIndexOf(".");
+  const stem = dot > 0 ? basePath.slice(0, dot) : basePath;
+  const ext = dot > 0 ? basePath.slice(dot) : "";
+
+  let i = 1;
+  let candidate = `${stem}-${i}${ext}`;
+  while (candidate in files) {
+    i++;
+    candidate = `${stem}-${i}${ext}`;
+  }
+  return candidate;
 }
 
 function normalizePath(rawPath: string): string {
@@ -125,18 +146,46 @@ export async function POST(req: NextRequest) {
       messages,
       userPrompt,
       files: incomingFiles,
+      images,
     } = await req.json();
 
     const files: Record<string, string> = { ...(incomingFiles || {}) };
+    const changes: FileChange[] = [];
 
     const conversationMessages: GeminiMessage[] = toGeminiMessages(
       messages || []
     );
 
     if (userPrompt) {
+      const imagePaths: string[] = [];
+      const imageParts: Array<{
+        inlineData: { mimeType: string; data: string };
+      }> = [];
+
+      if (Array.isArray(images)) {
+        for (const img of images as ImageAttachment[]) {
+          const path = uniquePath(
+            `images/${sanitizeFileName(img.name)}`,
+            files
+          );
+          const dataUri = `data:${img.mimeType};base64,${img.data}`;
+          files[path] = dataUri;
+          changes.push({ path, action: "created", before: null, after: dataUri });
+          imagePaths.push(path);
+          imageParts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
+        }
+      }
+
+      const text =
+        imagePaths.length > 0
+          ? `${userPrompt}\n\n[Uploaded image(s) saved in the workspace at: ${imagePaths.join(
+              ", "
+            )}. Look at the attached image(s) and use them as a design/content reference. If you want to actually display an uploaded image in the site, reference it with its exact path above, e.g. <img src="${imagePaths[0]}">.]`
+          : userPrompt;
+
       conversationMessages.push({
         role: "user",
-        parts: [{ text: userPrompt }],
+        parts: [{ text }, ...imageParts],
       });
     }
 
@@ -147,7 +196,6 @@ export async function POST(req: NextRequest) {
 
     let iterations = 0;
     const maxIterations = 10;
-    const changes: FileChange[] = [];
 
     while (toolUses.length > 0 && iterations < maxIterations) {
       iterations++;

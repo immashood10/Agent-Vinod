@@ -4,6 +4,13 @@ export interface Message {
   content: string;
   timestamp: string;
   changes?: FileChange[];
+  images?: Array<{ name: string; dataUrl: string }>;
+}
+
+export interface ImageAttachment {
+  name: string;
+  mimeType: string;
+  data: string;
 }
 
 export interface FileChange {

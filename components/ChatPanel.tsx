@@ -1,21 +1,45 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from "react";
-import { Send, Loader, RotateCcw, SquarePen } from "lucide-react";
-import type { Message } from "@/types/agent";
+import { Send, Loader, RotateCcw, SquarePen, Paperclip, X } from "lucide-react";
+import type { ImageAttachment, Message } from "@/types/agent";
 
 interface ChatPanelProps {
-  onSendMessage: (message: string) => Promise<void>;
+  onSendMessage: (message: string, images: ImageAttachment[]) => Promise<void>;
   onRevertTurn?: (message: Message) => void;
   onNewChat?: () => void;
   isLoading: boolean;
   messages: Message[];
 }
 
+interface PendingImage extends ImageAttachment {
+  previewUrl: string;
+}
+
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4MB
+
 function changeSymbol(action: "created" | "updated" | "deleted") {
   if (action === "created") return { char: "+", className: "text-green-400" };
   if (action === "deleted") return { char: "-", className: "text-red-400" };
   return { char: "~", className: "text-yellow-400" };
+}
+
+function readImageFile(file: File): Promise<PendingImage> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      const base64 = dataUrl.split(",")[1] || "";
+      resolve({
+        name: file.name,
+        mimeType: file.type || "image/png",
+        data: base64,
+        previewUrl: dataUrl,
+      });
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }
 
 export function ChatPanel({
@@ -26,8 +50,10 @@ export function ChatPanel({
   messages,
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -37,16 +63,39 @@ export function ChatPanel({
     scrollToBottom();
   }, [messages]);
 
+  const handleFilesSelected = async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+
+    const files = Array.from(fileList).filter((f) => f.type.startsWith("image/"));
+    const tooBig = files.some((f) => f.size > MAX_IMAGE_BYTES);
+    if (tooBig) {
+      alert("Images must be under 4MB each.");
+    }
+
+    const accepted = files.filter((f) => f.size <= MAX_IMAGE_BYTES);
+    const read = await Promise.all(accepted.map(readImageFile));
+    setPendingImages((prev) => [...prev, ...read]);
+  };
+
+  const removePendingImage = (index: number) => {
+    setPendingImages((prev) => prev.filter((_, i) => i !== index));
+  };
+
   const sendCurrentInput = async () => {
-    if (!input.trim() || isLoading) return;
+    if ((!input.trim() && pendingImages.length === 0) || isLoading) return;
 
     const message = input;
+    const images = pendingImages;
     setInput("");
+    setPendingImages([]);
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
 
-    await onSendMessage(message);
+    await onSendMessage(
+      message,
+      images.map(({ name, mimeType, data }) => ({ name, mimeType, data }))
+    );
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -115,9 +164,25 @@ export function ChatPanel({
                   : "bg-gray-700 text-gray-100 rounded-bl-none"
               }`}
             >
-              <p className="text-sm whitespace-pre-wrap break-words">
-                {msg.content}
-              </p>
+              {msg.images && msg.images.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {msg.images.map((img, i) => (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      key={i}
+                      src={img.dataUrl}
+                      alt={img.name}
+                      className="w-16 h-16 object-cover rounded border border-white/20"
+                    />
+                  ))}
+                </div>
+              )}
+
+              {msg.content && (
+                <p className="text-sm whitespace-pre-wrap break-words">
+                  {msg.content}
+                </p>
+              )}
 
               {msg.role === "assistant" && msg.changes && msg.changes.length > 0 && (
                 <div className="mt-2 pt-2 border-t border-gray-600/50">
@@ -171,7 +236,50 @@ export function ChatPanel({
 
       {/* Input Area */}
       <div className="border-t border-gray-700 p-4 bg-gray-800">
+        {pendingImages.length > 0 && (
+          <div className="flex flex-wrap gap-2 mb-2">
+            {pendingImages.map((img, i) => (
+              <div key={i} className="relative">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={img.previewUrl}
+                  alt={img.name}
+                  className="w-14 h-14 object-cover rounded border border-gray-600"
+                />
+                <button
+                  type="button"
+                  onClick={() => removePendingImage(i)}
+                  title="Remove image"
+                  className="absolute -top-1.5 -right-1.5 bg-gray-900 border border-gray-600 rounded-full p-0.5 hover:bg-red-600 transition-colors"
+                >
+                  <X className="w-3 h-3 text-white" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="flex gap-2 items-end">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            hidden
+            onChange={(e) => {
+              void handleFilesSelected(e.target.files);
+              e.target.value = "";
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isLoading}
+            title="Attach an image"
+            className="bg-gray-700 hover:bg-gray-600 border border-gray-600 text-gray-300 rounded-lg px-3 py-2 flex items-center transition-colors disabled:opacity-50"
+          >
+            <Paperclip className="w-4 h-4" />
+          </button>
           <textarea
             ref={textareaRef}
             value={input}
@@ -184,7 +292,7 @@ export function ChatPanel({
           />
           <button
             type="submit"
-            disabled={isLoading || !input.trim()}
+            disabled={isLoading || (!input.trim() && pendingImages.length === 0)}
             className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white rounded-lg px-3 py-2 flex items-center gap-2 transition-colors"
           >
             <Send className="w-4 h-4" />

@@ -5,7 +5,7 @@ import { ChatPanel } from "@/components/ChatPanel";
 import { FileExplorer } from "@/components/FileExplorer";
 import { CodeEditor } from "@/components/CodeEditor";
 import { Preview } from "@/components/Preview";
-import type { Message } from "@/types/agent";
+import type { ImageAttachment, Message } from "@/types/agent";
 
 interface FileItem {
   name: string;
@@ -79,6 +79,17 @@ function buildPreviewDoc(files: Record<string, string>): string {
     }
   );
 
+  // Rewrite <img src="local-file"> to the data: URI stored for that file,
+  // since a plain relative path has nothing to resolve against in srcDoc.
+  html = html.replace(/<img\b[^>]*>/gi, (tag) => {
+    const srcMatch = /src=["']([^"']+)["']/i.exec(tag);
+    if (!srcMatch) return tag;
+    if (isExternal(srcMatch[1]) || srcMatch[1].startsWith("data:")) return tag;
+    const key = resolveLocal(srcMatch[1]);
+    if (!key || !files[key].startsWith("data:")) return tag;
+    return tag.replace(srcMatch[0], `src="${files[key]}"`);
+  });
+
   return html;
 }
 
@@ -129,12 +140,21 @@ export function Workspace() {
     setSelectedFile(filePath);
   }, []);
 
-  const handleSendMessage = useCallback(async (userPrompt: string) => {
+  const handleSendMessage = useCallback(async (
+    userPrompt: string,
+    images: ImageAttachment[] = []
+  ) => {
     const pendingUserMessage: Message = {
       id: `pending-${Date.now()}`,
       role: "user",
       content: userPrompt,
       timestamp: new Date().toISOString(),
+      images: images.length > 0
+        ? images.map((img) => ({
+            name: img.name,
+            dataUrl: `data:${img.mimeType};base64,${img.data}`,
+          }))
+        : undefined,
     };
 
     const historyBeforeSend = messages;
@@ -155,6 +175,7 @@ export function Workspace() {
             content: msg.content,
           })),
           files,
+          images,
         }),
       });
 
