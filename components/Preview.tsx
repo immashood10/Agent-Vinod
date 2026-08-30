@@ -1,13 +1,15 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { RefreshCw, Eye, EyeOff, AlertCircle } from "lucide-react";
+import { RefreshCw, Eye, EyeOff, AlertCircle, Home } from "lucide-react";
 
 interface PreviewProps {
   isLoading?: boolean;
   buildStatus?: "idle" | "building" | "success" | "error";
   buildError?: string;
   srcDoc?: string;
+  currentPage?: string;
+  onGoHome?: () => void;
 }
 
 export function Preview({
@@ -15,6 +17,8 @@ export function Preview({
   buildStatus = "idle",
   buildError,
   srcDoc = "",
+  currentPage = "index.html",
+  onGoHome,
 }: PreviewProps) {
   const [showPreview, setShowPreview] = useState(false);
   const [iframeKey, setIframeKey] = useState(0);
@@ -46,16 +50,32 @@ export function Preview({
             {buildStatus === "error" && "Error"}
             {buildStatus === "idle" && "Idle"}
           </span>
+          {currentPage !== "index.html" && buildStatus === "success" && (
+            <span className="text-xs font-mono text-gray-400 truncate max-w-[140px]">
+              / {currentPage}
+            </span>
+          )}
         </div>
-        <button
-          onClick={handleRefresh}
-          disabled={isLoading}
-          className="p-1 hover:bg-gray-800 rounded transition-colors disabled:opacity-50"
-        >
-          <RefreshCw
-            className={`w-4 h-4 text-gray-400 ${isLoading ? "animate-spin" : ""}`}
-          />
-        </button>
+        <div className="flex items-center gap-1">
+          {currentPage !== "index.html" && onGoHome && (
+            <button
+              onClick={onGoHome}
+              title="Back to index.html"
+              className="p-1 hover:bg-gray-800 rounded transition-colors"
+            >
+              <Home className="w-4 h-4 text-gray-400" />
+            </button>
+          )}
+          <button
+            onClick={handleRefresh}
+            disabled={isLoading}
+            className="p-1 hover:bg-gray-800 rounded transition-colors disabled:opacity-50"
+          >
+            <RefreshCw
+              className={`w-4 h-4 text-gray-400 ${isLoading ? "animate-spin" : ""}`}
+            />
+          </button>
+        </div>
       </div>
 
       {/* Content */}

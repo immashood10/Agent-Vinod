@@ -47,11 +47,29 @@ function buildFileTree(files: Record<string, string>): FileItem[] {
   return listDir("");
 }
 
+// Intercepts clicks on links to other local pages inside the preview iframe
+// and asks the parent to swap srcDoc to that page instead of letting the
+// browser navigate to it directly - a plain relative href has no real URL
+// to resolve against inside a srcDoc iframe, which is what was 404ing.
+const NAV_INTERCEPT_SCRIPT = `
+<script>
+document.addEventListener("click", function (e) {
+  var a = e.target.closest("a");
+  if (!a) return;
+  var href = a.getAttribute("href");
+  if (!href || href.startsWith("#")) return;
+  if (/^([a-z]+:)?\\/\\//i.test(href)) return;
+  if (href.startsWith("mailto:") || href.startsWith("tel:")) return;
+  e.preventDefault();
+  window.parent.postMessage({ type: "agent-vinod-navigate", href: href }, "*");
+});
+</script>`;
+
 // Inlines local <link rel="stylesheet"> / <script src="..."> references so
 // the whole site can be rendered via a single iframe srcDoc with no server
 // round-trip. External URLs (CDNs like Bootstrap) are left untouched.
-function buildPreviewDoc(files: Record<string, string>): string {
-  const index = files["index.html"];
+function buildPreviewDoc(files: Record<string, string>, entryPath: string): string {
+  const index = files[entryPath];
   if (index === undefined) return "";
 
   const isExternal = (url: string) => /^([a-z]+:)?\/\//i.test(url);
@@ -90,6 +108,10 @@ function buildPreviewDoc(files: Record<string, string>): string {
     return tag.replace(srcMatch[0], `src="${files[key]}"`);
   });
 
+  html = html.includes("</body>")
+    ? html.replace("</body>", `${NAV_INTERCEPT_SCRIPT}\n</body>`)
+    : html + NAV_INTERCEPT_SCRIPT;
+
   return html;
 }
 
@@ -99,6 +121,7 @@ export function Workspace() {
   const [selectedFile, setSelectedFile] = useState<string>("");
   const [isLoading, setIsLoading] = useState(false);
   const [buildError, setBuildError] = useState<string>("");
+  const [previewPage, setPreviewPage] = useState<string>("index.html");
 
   // Chat history is the only thing that survives a refresh - it's kept in
   // localStorage (client-owned), never sent anywhere for server storage.
@@ -125,8 +148,28 @@ export function Workspace() {
     }
   }, []);
 
+  // Receives in-preview link clicks (see NAV_INTERCEPT_SCRIPT) and switches
+  // which page is rendered in the iframe, so multi-page sites navigate
+  // correctly instead of 404ing on a plain relative href.
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type !== "agent-vinod-navigate") return;
+      const href = event.data.href as string;
+      const key = href.replace(/^\.?\//, "");
+      if (files[key] !== undefined) {
+        setPreviewPage(key);
+      }
+    };
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [files]);
+
   const fileTree = useMemo(() => buildFileTree(files), [files]);
-  const previewDoc = useMemo(() => buildPreviewDoc(files), [files]);
+  const effectivePreviewPage = files[previewPage] !== undefined ? previewPage : "index.html";
+  const previewDoc = useMemo(
+    () => buildPreviewDoc(files, effectivePreviewPage),
+    [files, effectivePreviewPage]
+  );
 
   const buildStatus: "idle" | "building" | "success" | "error" = isLoading
     ? "building"
@@ -250,6 +293,7 @@ export function Workspace() {
     setFiles({});
     setSelectedFile("");
     setBuildError("");
+    setPreviewPage("index.html");
     persistMessages([]);
   }, [persistMessages]);
 
@@ -292,6 +336,8 @@ export function Workspace() {
             buildStatus={buildStatus}
             buildError={buildError}
             srcDoc={previewDoc}
+            currentPage={effectivePreviewPage}
+            onGoHome={() => setPreviewPage("index.html")}
           />
         </div>
 
