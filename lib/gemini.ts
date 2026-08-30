@@ -99,6 +99,36 @@ const tools: FunctionDeclaration[] = [
 export { tools };
 export type { Content as GeminiMessage };
 
+// The API occasionally returns a completely empty candidate (no text, no
+// function call) or the request fails with a transient network error
+// (observed: ECONNRESET) with no indication in either case that anything
+// is actually wrong with the request. Retrying a couple of times with a
+// short backoff clears this up reliably in practice.
+async function generateContentWithRetry(
+  params: Parameters<typeof ai.models.generateContent>[0],
+  attempts = 3
+) {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const result = await ai.models.generateContent(params);
+      const parts = result.candidates?.[0]?.content?.parts ?? [];
+      const hasContent = parts.some((p) => p.text || p.functionCall);
+      if (hasContent) return result;
+      lastError = new Error("Gemini returned an empty response");
+    } catch (error) {
+      lastError = error;
+    }
+
+    if (attempt < attempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 export async function callGemini(
   messages: Content[],
   systemPrompt: string
@@ -107,7 +137,7 @@ export async function callGemini(
   toolUses: ToolCall[];
   modelContent: Content | null;
 }> {
-  const result = await ai.models.generateContent({
+  const result = await generateContentWithRetry({
     model: GEMINI_MODEL,
     contents: messages,
     config: {
